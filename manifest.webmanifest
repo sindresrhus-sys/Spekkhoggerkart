@@ -1,0 +1,9 @@
+{
+  "name": "Spekkhoggerkart",
+  "short_name": "Spekkhogger",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#eef3f6",
+  "theme_color": "#083b66",
+  "icons": [{"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
+}

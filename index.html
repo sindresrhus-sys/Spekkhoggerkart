@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="nb">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#083b66">
+  <title>Spekkhoggerkart</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    *{box-sizing:border-box} html,body{height:100%;margin:0;font-family:system-ui,-apple-system,sans-serif}
+    body{display:grid;grid-template-rows:auto 1fr;background:#eef3f6}
+    header{z-index:1000;background:#083b66;color:#fff;padding:calc(10px + env(safe-area-inset-top)) 12px 10px;display:flex;align-items:center;gap:10px;box-shadow:0 1px 5px #0005}
+    .head{flex:1;min-width:0} h1{font-size:18px;margin:0}.sub{font-size:12px;opacity:.85;margin-top:2px}
+    button{border:0;border-radius:999px;padding:9px 12px;background:#fff;color:#083b66;font-weight:700}
+    #map{height:100%;width:100%}.status{position:fixed;z-index:900;top:82px;left:50%;transform:translateX(-50%);background:#fffffff2;padding:7px 11px;border-radius:999px;box-shadow:0 2px 8px #0003;font-size:12px;max-width:calc(100% - 24px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .popup{min-width:210px;max-width:300px}.popup h2{font-size:17px;margin:0 0 6px}.meta{font-size:13px;line-height:1.5}.photo{width:100%;max-height:210px;object-fit:cover;border-radius:8px;margin-top:8px}.link{display:inline-block;margin-top:8px;font-weight:700;color:#075ea8;text-decoration:none}
+    .legend{background:#fffffff2;padding:7px 9px;border-radius:8px;box-shadow:0 1px 5px #0002;font-size:11px;line-height:1.45}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}
+  </style>
+</head>
+<body>
+<header><div class="head"><h1>🐋 Spekkhoggerkart</h1><div class="sub" id="period">Siste 14 dager</div></div><button id="refresh">Oppdater</button></header>
+<main id="map"></main><div id="status" class="status">Henter observasjoner …</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const DAYS=14, SCIENTIFIC_NAME='Orcinus orca';
+const map=L.map('map').setView([65,13],4);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; OpenStreetMap-bidragsytere'}).addTo(map);
+const group=L.layerGroup().addTo(map), statusEl=document.querySelector('#status'), refresh=document.querySelector('#refresh'), period=document.querySelector('#period');
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const iso=d=>d.toISOString().slice(0,10);
+function dateText(s){if(!s)return 'Ikke oppgitt';const d=new Date(s);return isNaN(d)?s:new Intl.DateTimeFormat('nb-NO',{dateStyle:'medium'}).format(d)}
+function age(s){return Math.max(0,(Date.now()-new Date(s).getTime())/86400000)}
+function color(a){return a<=1?'#d51f29':a<=3?'#ef7f1a':a<=7?'#e9b817':'#2a73b8'}
+function image(r){const m=Array.isArray(r.media)?r.media:[];return m.find(x=>/StillImage|image/i.test(x.type||''))?.identifier||m[0]?.identifier||null}
+function popup(r){
+ const place=r.locality||r.municipality||r.stateProvince||r.waterBody||'Sted ikke oppgitt';
+ const count=r.individualCount?`${r.individualCount} individ${r.individualCount==1?'':'er'}`:'Ikke oppgitt';
+ const img=image(r), url=`https://www.gbif.org/occurrence/${encodeURIComponent(r.key)}`;
+ return `<div class="popup"><h2>🐋 Spekkhogger</h2><div class="meta"><b>Dato:</b> ${esc(dateText(r.eventDate))}<br><b>Sted:</b> ${esc(place)}<br><b>Antall:</b> ${esc(count)}<br><b>Kilde:</b> ${esc(r.datasetTitle||r.institutionCode||'GBIF')}</div>${img?`<img class="photo" src="${esc(img)}" alt="Bilde fra observasjonen" loading="lazy" onerror="this.style.display='none'">`:''}<a class="link" href="${url}" target="_blank" rel="noopener">Åpne originalregistrering ↗</a></div>`
+}
+async function load(){
+ refresh.disabled=true;statusEl.hidden=false;statusEl.textContent='Henter observasjoner …';group.clearLayers();
+ const to=new Date(), from=new Date();from.setDate(to.getDate()-DAYS);
+ period.textContent=`${from.toLocaleDateString('nb-NO')} – ${to.toLocaleDateString('nb-NO')} · siste ${DAYS} dager`;
+ const q=new URLSearchParams({scientificName:SCIENTIFIC_NAME,country:'NO',hasCoordinate:'true',occurrenceStatus:'PRESENT',eventDate:`${iso(from)},${iso(to)}`,limit:'300'});
+ try{
+  const res=await fetch('https://api.gbif.org/v1/occurrence/search?'+q);if(!res.ok)throw Error(res.status);
+  const data=await res.json();const rows=(data.results||[]).filter(r=>Number.isFinite(r.decimalLatitude)&&Number.isFinite(r.decimalLongitude)&&r.eventDate).sort((a,b)=>new Date(b.eventDate)-new Date(a.eventDate));
+  const bounds=[];
+  rows.forEach(r=>{const a=age(r.eventDate);L.circleMarker([r.decimalLatitude,r.decimalLongitude],{radius:a<=3?8:7,color:'#fff',weight:2,fillColor:color(a),fillOpacity:.92}).bindPopup(popup(r),{maxWidth:320}).addTo(group);bounds.push([r.decimalLatitude,r.decimalLongitude])});
+  if(bounds.length)map.fitBounds(bounds,{padding:[25,25],maxZoom:8});
+  statusEl.textContent=rows.length?`${rows.length} observasjon${rows.length===1?'':'er'} siste ${DAYS} dager`:`Ingen registrerte observasjoner siste ${DAYS} dager`;
+  setTimeout(()=>statusEl.hidden=true,3500);
+ }catch(e){console.error(e);statusEl.textContent='Kunne ikke hente data. Trykk Oppdater.'}finally{refresh.disabled=false}
+}
+const legend=L.control({position:'bottomright'});legend.onAdd=()=>{const d=L.DomUtil.create('div','legend');d.innerHTML='<b>Alder</b><br><span class="dot" style="background:#d51f29"></span>≤ 1 døgn<br><span class="dot" style="background:#ef7f1a"></span>2–3 døgn<br><span class="dot" style="background:#e9b817"></span>4–7 døgn<br><span class="dot" style="background:#2a73b8"></span>8–14 døgn';return d};legend.addTo(map);
+refresh.onclick=load;load();if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
+</script>
+</body></html>
