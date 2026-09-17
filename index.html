@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="nb">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#083b66">
+  <title>Spekkhoggerkart</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    *{box-sizing:border-box} html,body{height:100%;margin:0;font-family:system-ui,-apple-system,sans-serif}
+    body{display:grid;grid-template-rows:auto 1fr;background:#eef3f6}
+    header{z-index:1000;background:#083b66;color:#fff;padding:calc(10px + env(safe-area-inset-top)) 12px 10px;display:flex;align-items:center;gap:10px;box-shadow:0 1px 5px #0005}
+    .head{flex:1;min-width:0} h1{font-size:18px;margin:0}.sub{font-size:12px;opacity:.88;margin-top:2px}
+    button{border:0;border-radius:999px;padding:9px 12px;background:#fff;color:#083b66;font-weight:700}
+    #map{height:100%;width:100%}.status{position:fixed;z-index:900;top:82px;left:50%;transform:translateX(-50%);background:#fffffff2;padding:7px 11px;border-radius:999px;box-shadow:0 2px 8px #0003;font-size:12px;max-width:calc(100% - 24px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .popup{min-width:210px;max-width:300px}.popup h2{font-size:17px;margin:0 0 6px}.meta{font-size:13px;line-height:1.5}.photo{width:100%;max-height:210px;object-fit:cover;border-radius:8px;margin-top:8px}.link{display:inline-block;margin-top:8px;font-weight:700;color:#075ea8;text-decoration:none}
+    .legend{background:#fffffff2;padding:7px 9px;border-radius:8px;box-shadow:0 1px 5px #0002;font-size:11px;line-height:1.45}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}
+  </style>
+</head>
+<body>
+<header>
+  <div class="head">
+    <h1>🐋 Spekkhoggerkart</h1>
+    <div class="sub" id="period">Siste 14 dager · Artskart</div>
+  </div>
+  <button id="refresh">Oppdater</button>
+</header>
+<main id="map"></main>
+<div id="status" class="status">Henter observasjoner …</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const DAYS = 14;
+const TAXON_ID = 31303; // Spekkhogger, Artsdatabanken
+const API = 'https://allemannsdata.com/wiki/api/v1/kilder/artskart/find_observations';
+
+const map = L.map('map').setView([65,13],4);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+  maxZoom:18,
+  attribution:'&copy; OpenStreetMap-bidragsytere'
+}).addTo(map);
+
+const group = L.layerGroup().addTo(map);
+const statusEl = document.querySelector('#status');
+const refresh = document.querySelector('#refresh');
+const period = document.querySelector('#period');
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+}[c]));
+
+const iso = d => d.toISOString().slice(0,10);
+
+function parseDate(v){
+  if(!v) return null;
+  if(/^\d{2}\.\d{2}\.\d{4}/.test(v)){
+    const [dd,mm,yyyy] = v.slice(0,10).split('.');
+    return new Date(`${yyyy}-${mm}-${dd}T12:00:00`);
+  }
+  const d = new Date(v);
+  return isNaN(d) ? null : d;
+}
+
+function dateText(v){
+  const d = parseDate(v);
+  return d ? new Intl.DateTimeFormat('nb-NO',{dateStyle:'medium'}).format(d) : (v || 'Ikke oppgitt');
+}
+
+function age(v){
+  const d = parseDate(v);
+  return d ? Math.max(0,(Date.now()-d.getTime())/86400000) : 99;
+}
+function color(a){ return a<=1?'#d51f29':a<=3?'#ef7f1a':a<=7?'#e9b817':'#2a73b8'; }
+
+function first(obj, keys){
+  for(const k of keys){
+    if(obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== '') return obj[k];
+  }
+  return null;
+}
+
+function asNum(v){
+  if(typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if(typeof v === 'string'){
+    const n = Number(v.replace(',','.'));
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function extractRows(data){
+  if(Array.isArray(data)) return data;
+  if(!data || typeof data !== 'object') return [];
+  for(const key of ['items','results','observations','records','data','features']){
+    if(Array.isArray(data[key])) return data[key];
+    if(data[key] && typeof data[key] === 'object'){
+      const nested = extractRows(data[key]);
+      if(nested.length) return nested;
+    }
+  }
+  return [];
+}
+
+function imageUrl(r){
+  const direct = first(r,['image_url','imageUrl','ImageUrl','thumbnail','thumbnail_url','ThumbImgUrl']);
+  if(direct) return direct;
+  const arr = first(r,['images','Images','ThumbImgUrls','media']);
+  if(Array.isArray(arr) && arr.length){
+    const x = arr[0];
+    if(typeof x === 'string') return x;
+    if(x && typeof x === 'object') return first(x,['url','identifier','href','src']);
+  }
+  return null;
+}
+
+function normalize(r){
+  const props = r?.properties && typeof r.properties === 'object' ? {...r, ...r.properties} : r;
+  let lat = asNum(first(props,['latitude','lat','Latitude','decimalLatitude']));
+  let lon = asNum(first(props,['longitude','lon','lng','Longitude','decimalLongitude']));
+
+  if((lat===null || lon===null) && r?.geometry?.coordinates?.length>=2){
+    lon = asNum(r.geometry.coordinates[0]);
+    lat = asNum(r.geometry.coordinates[1]);
+  }
+
+  return {
+    raw: props,
+    lat, lon,
+    date: first(props,['date','observation_date','event_date','eventDate','collected_date','CollectedDate','DateTimeCollected']),
+    locality: first(props,['locality','Locality','place','location_name']),
+    municipality: first(props,['municipality','Municipality']),
+    county: first(props,['county','County']),
+    count: first(props,['count','Count','individual_count','individualCount']),
+    dataset: first(props,['dataset','dataset_name','DatasetName','source','Institution']),
+    id: first(props,['id','Id','observation_id','observationId','catalog_number','CatalogNumber']),
+    url: first(props,['url','obs_url','ObsUrl','detail_url','DetailUrl']),
+    image: imageUrl(props)
+  };
+}
+
+function popup(o){
+  const place = [o.locality,o.municipality,o.county].filter(Boolean).join(', ') || 'Sted ikke oppgitt';
+  const count = o.count ? `${o.count} individ${Number(o.count)===1?'':'er'}` : 'Ikke oppgitt';
+  const sourceUrl = o.url || 'https://artskart.artsdatabanken.no/';
+  return `<div class="popup">
+    <h2>🐋 Spekkhogger</h2>
+    <div class="meta">
+      <b>Dato:</b> ${esc(dateText(o.date))}<br>
+      <b>Sted:</b> ${esc(place)}<br>
+      <b>Antall:</b> ${esc(count)}<br>
+      <b>Kilde:</b> ${esc(o.dataset || 'Artskart')}
+    </div>
+    ${o.image ? `<img class="photo" src="${esc(o.image)}" alt="Bilde fra observasjonen" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'">` : ''}
+    <a class="link" href="${esc(sourceUrl)}" target="_blank" rel="noopener">Åpne kilde ↗</a>
+  </div>`;
+}
+
+async function load(){
+  refresh.disabled = true;
+  statusEl.hidden = false;
+  statusEl.textContent = 'Henter observasjoner fra Artskart …';
+  group.clearLayers();
+
+  const to = new Date();
+  const from = new Date();
+  from.setDate(to.getDate() - DAYS);
+  period.textContent = `${from.toLocaleDateString('nb-NO')} – ${to.toLocaleDateString('nb-NO')} · Artskart`;
+
+  const q = new URLSearchParams({
+    taxon_id: String(TAXON_ID),
+    from_date: iso(from),
+    to_date: iso(to),
+    page: '0',
+    page_size: '100',
+    limit: '100',
+    offset: '0'
+  });
+
+  try{
+    const res = await fetch(`${API}?${q}`, {cache:'no-store'});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const payload = await res.json();
+    const rows = extractRows(payload.data ?? payload)
+      .map(normalize)
+      .filter(o => o.lat!==null && o.lon!==null && o.date)
+      .filter(o => {
+        const d = parseDate(o.date);
+        return d && d >= from && d <= new Date(to.getTime()+86400000);
+      })
+      .sort((a,b)=>parseDate(b.date)-parseDate(a.date));
+
+    const bounds = [];
+    for(const o of rows){
+      const a = age(o.date);
+      L.circleMarker([o.lat,o.lon],{
+        radius:a<=3?8:7,
+        color:'#fff',
+        weight:2,
+        fillColor:color(a),
+        fillOpacity:.92
+      }).bindPopup(popup(o),{maxWidth:320}).addTo(group);
+      bounds.push([o.lat,o.lon]);
+    }
+
+    if(bounds.length) map.fitBounds(bounds,{padding:[25,25],maxZoom:8});
+    statusEl.textContent = rows.length
+      ? `${rows.length} observasjon${rows.length===1?'':'er'} siste ${DAYS} dager`
+      : `Ingen Artskart-observasjoner funnet siste ${DAYS} dager`;
+    setTimeout(()=>statusEl.hidden=true,4000);
+  }catch(err){
+    console.error(err);
+    statusEl.textContent = 'Kunne ikke hente Artskart-data. Trykk Oppdater.';
+  }finally{
+    refresh.disabled = false;
+  }
+}
+
+const legend=L.control({position:'bottomright'});
+legend.onAdd=()=>{
+  const d=L.DomUtil.create('div','legend');
+  d.innerHTML='<b>Alder</b><br><span class="dot" style="background:#d51f29"></span>≤ 1 døgn<br><span class="dot" style="background:#ef7f1a"></span>2–3 døgn<br><span class="dot" style="background:#e9b817"></span>4–7 døgn<br><span class="dot" style="background:#2a73b8"></span>8–14 døgn';
+  return d;
+};
+legend.addTo(map);
+
+refresh.onclick=load;
+load();
+</script>
+</body>
+</html>
